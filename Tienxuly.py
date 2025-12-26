@@ -1,4 +1,7 @@
 
+
+
+
 from pyspark.sql import SparkSession, functions as F
 import pandas as pd
 import os
@@ -68,6 +71,62 @@ else:
     print("Cách mã hóa FinalGrade là đúng")
 #====
 # ==================================================
+# ==================================================
+# 5.5XỬ LÝ NGOẠI LAI (OUTLIERS)
+# ==================================================
+print("\n===== XỬ LÝ NGOẠI LAI =====")
+
+# Xác định các cột số cần kiểm tra outliers
+numeric_cols_for_outlier = [c for c, t in df_clean.dtypes if t in ("int", "double")]
+
+# Loại bỏ FinalGrade khỏi danh sách vì nó là biến phân loại
+if "FinalGrade" in numeric_cols_for_outlier:
+    numeric_cols_for_outlier.remove("FinalGrade")
+if "FinalGrade_Goc" in numeric_cols_for_outlier:
+    numeric_cols_for_outlier.remove("FinalGrade_Goc")
+
+# Lưu số dòng trước khi xử lý
+before_outlier = df_clean.count()
+
+# IQR (Interquartile Range)
+print("\nSử dụng phương pháp IQR để phát hiện outliers...")
+
+for c in numeric_cols_for_outlier:
+    # Tính Q1, Q3
+    quantiles = df_clean.approxQuantile(c, [0.25, 0.75], 0.01)
+    Q1 = quantiles[0]
+    Q3 = quantiles[1]
+    IQR = Q3 - Q1
+
+    # Xác định ngưỡng
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    # Đếm số outliers
+    outliers_count = df_clean.filter(
+        (F.col(c) < lower_bound) | (F.col(c) > upper_bound)
+    ).count()
+
+    print(f"\n{c}:")
+    print(f"  Q1 = {Q1:.2f}, Q3 = {Q3:.2f}, IQR = {IQR:.2f}")
+    print(f"  Ngưỡng: [{lower_bound:.2f}, {upper_bound:.2f}]")
+    print(f"  Số outliers: {outliers_count} ({100 * outliers_count / before_outlier:.2f}%)")
+
+    # Loại bỏ outliers
+    df_clean = df_clean.filter(
+        (F.col(c) >= lower_bound) & (F.col(c) <= upper_bound)
+    )
+
+after_outlier = df_clean.count()
+removed = before_outlier - after_outlier
+
+print(f"\n{'=' * 60}")
+print(f"Tổng số dòng trước khi xử lý outliers: {before_outlier}")
+print(f"Tổng số dòng sau khi xử lý outliers: {after_outlier}")
+print(f"Số dòng bị loại bỏ: {removed} ({100 * removed / before_outlier:.2f}%)")
+print(f"{'=' * 60}")
+
+#=====
 # 5.6PHÂN TÍCH PHÂN PHỐI FINALGRADE
 # ==================================================
 print("\nPhân tích phân phối của FinalGrade...")
@@ -118,18 +177,56 @@ for c in numeric_cols:
 print("\n===== MỘT SỐ DÒNG Z-SCORE =====")
 df_zscore.select(zscore_cols).show(5)
 #===
+# ==================================================
 # 6.5️⃣ PHÂN TÍCH TƯƠNG QUAN VỚI FINALGRADE
 # ==================================================
-print("Tính hệ số tương quan giữa các thuộc tính và FinalGrade...")
+print("\nTính hệ số tương quan giữa các thuộc tính và FinalGrade...")
 
 correlations = []  # Danh sách lưu (tên thuộc tính, hệ số tương quan)
 
 for c in numeric_cols:
     # Bỏ qua chính FinalGrade và cột gốc trước khi reverse encoding
-    if c != "FinalGrade" and c != "FinalGrade_Original":
-        # Tính hệ số tương quan Pearson giữa cột c và FinalGrade
-        corr = df_clean.stat.corr(c, "FinalGrade")
-        correlations.append((c, corr))
+    if c != "FinalGrade" and c != "FinalGrade_Goc":
+        try:
+            # Kiểm tra độ lệch chuẩn trước khi tính correlation
+            std_val = df_clean.select(F.stddev(c)).first()[0]
+
+            if std_val is None or std_val == 0:
+                print(f"Bỏ qua cột '{c}': Không có sự biến thiên (std = 0)")
+                correlations.append((c, 0.0))  # Gán correlation = 0
+                continue
+
+            # Tính hệ số tương quan Pearson giữa cột c và FinalGrade
+            corr = df_clean.stat.corr(c, "FinalGrade")
+            correlations.append((c, corr))
+
+        except Exception as e:
+            print(f"Lỗi khi tính correlation cho cột '{c}': {str(e)}")
+            correlations.append((c, None))
+
+# Lọc bỏ các giá trị None
+correlations = [(c, corr) for c, corr in correlations if corr is not None]
+
+# Sắp xếp theo độ mạnh của tương quan (giá trị tuyệt đối giảm dần)
+correlations.sort(key=lambda x: abs(x[1]), reverse=True)
+
+# Chuyển sang DataFrame Pandas để hiển thị
+corr_df = pd.DataFrame(correlations, columns=["Thuộc tính", "Hệ số tương quan"])
+
+print("\n" + "=" * 60)
+print("TƯƠNG QUAN GIỮA CÁC THUỘC TÍNH VÀ FINALGRADE")
+print("=" * 60)
+print(corr_df.to_string(index=False))
+
+# Ngưỡng xác định thuộc tính quan trọng
+threshold = 0.1
+
+# Lọc các thuộc tính có tương quan đáng kể
+important_features = [f for f, c in correlations if abs(c) > threshold]
+
+print(f"\nCó {len(important_features)} thuộc tính có |hệ số tương quan| > {threshold}")
+if important_features:
+    print(f"Danh sách: {', '.join(important_features)}")
 
 # Sắp xếp theo độ mạnh của tương quan (giá trị tuyệt đối giảm dần)
 correlations.sort(key=lambda x: abs(x[1]), reverse=True)
